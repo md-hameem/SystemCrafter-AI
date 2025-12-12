@@ -2,7 +2,7 @@
 SystemCrafter AI - Orchestrator Core Configuration
 """
 from functools import lru_cache
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -35,9 +35,17 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     
-    # OpenAI / LLM
+    # LLM Provider Selection
+    llm_provider: Literal["openai", "gemini"] = "gemini"
+    
+    # OpenAI Configuration
     openai_api_key: str = Field(default="")
-    llm_model: str = "gpt-4-turbo-preview"
+    
+    # Google Gemini Configuration
+    gemini_api_key: str = Field(default="")
+    
+    # LLM Model Settings
+    llm_model: str = "gemini-2.5-flash"
     llm_temperature: float = 0.2
     llm_max_tokens: int = 4096
     

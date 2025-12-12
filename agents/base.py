@@ -6,10 +6,10 @@ import json
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
-from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from orchestrator.core import get_logger, get_settings
+from orchestrator.core.llm_client import LLMClient, get_llm
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -37,7 +37,7 @@ class BaseAgent(ABC):
     
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
-        self.client = AsyncOpenAI(api_key=settings.openai_api_key)
+        self.llm_client: LLMClient = get_llm()
         
         # Audit trail
         self.last_prompt: Optional[str] = None
@@ -110,25 +110,16 @@ class BaseAgent(ABC):
         
         for attempt in range(self.config.max_retries):
             try:
-                response = await self.client.chat.completions.create(
-                    model=self.config.model,
-                    messages=[
-                        {"role": "system", "content": self.system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
+                # Use the abstracted LLM client for JSON responses
+                result = await self.llm_client.generate_json(
+                    prompt=user_prompt,
+                    system_prompt=self.system_prompt,
                     temperature=self.config.temperature,
                     max_tokens=self.config.max_tokens,
-                    response_format={"type": "json_object"},
                 )
                 
-                # Track token usage
-                if response.usage:
-                    self.last_tokens_used = response.usage.total_tokens
-                
-                content = response.choices[0].message.content
-                if content:
-                    return content
-                raise ValueError("Empty response from LLM")
+                # Return as JSON string for parsing
+                return json.dumps(result)
                 
             except Exception as e:
                 last_error = e
