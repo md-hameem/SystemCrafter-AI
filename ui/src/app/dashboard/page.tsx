@@ -16,10 +16,11 @@ export default function DashboardPage() {
     queryFn: () => apiClient.getProjects(0, 6),
   })
 
+  const activeStatuses = ['analyzing', 'designing', 'generating', 'building', 'deploying'] as const
   const stats = {
     totalProjects: projects?.length || 0,
     completed: projects?.filter((p) => p.status === 'completed').length || 0,
-    inProgress: projects?.filter((p) => p.status === 'in_progress').length || 0,
+    inProgress: projects?.filter((p) => activeStatuses.includes(p.status as typeof activeStatuses[number])).length || 0,
   }
 
   return (

@@ -241,7 +241,7 @@ class Artifact(Base):
     content_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     
     # Metadata
-    metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    artifact_metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

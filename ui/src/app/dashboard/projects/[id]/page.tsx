@@ -185,7 +185,7 @@ export default function ProjectDetailPage() {
           </div>
           
           <div className="flex gap-3">
-            {project.status === 'draft' && (
+            {project.status === 'pending' && (
               <Button
                 onClick={() => startMutation.mutate()}
                 isLoading={startMutation.isPending || isGenerating}

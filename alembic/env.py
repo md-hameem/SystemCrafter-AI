@@ -19,8 +19,8 @@ config = context.config
 # Load settings
 settings = get_settings()
 
-# Override sqlalchemy.url with our database URL
-config.set_main_option("sqlalchemy.url", settings.database_url.replace("+asyncpg", ""))
+# Override sqlalchemy.url with our database URL (keep asyncpg for async engine)
+config.set_main_option("sqlalchemy.url", settings.database_url)
 
 # Interpret the config file for Python logging
 if config.config_file_name is not None:
