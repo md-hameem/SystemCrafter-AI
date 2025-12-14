@@ -22,6 +22,10 @@ from orchestrator.services.websocket_manager import ws_manager
 
 logger = get_logger(__name__)
 settings = get_settings()
+# Global semaphore to limit concurrent LLM requests coming from agents.
+# Coarse-grained: limits number of agents that may run LLM-heavy work concurrently.
+_LLM_CONCURRENCY = getattr(settings, "llm_concurrent_requests", 3)
+_llm_semaphore: asyncio.Semaphore = asyncio.Semaphore(_LLM_CONCURRENCY)
 
 
 class OrchestratorService:
@@ -246,102 +250,124 @@ class OrchestratorService:
         """Run a single agent and store its output."""
         logger.info("Running agent", project_id=str(project_id), agent_type=agent_type.value)
         
-        # Create task record
-        task = AgentTask(
-            project_id=project_id,
-            agent_type=agent_type,
-            status=TaskStatus.RUNNING,
-            input_data=input_data,
-            started_at=datetime.utcnow(),
-        )
-        self.db.add(task)
-        await self.db.flush()
-        
-        # Broadcast task started
-        await self._broadcast_event(
-            project_id,
-            WSEventType.TASK_STARTED,
-            {"task_id": str(task.id), "agent_type": agent_type.value},
-        )
-        
-        try:
-            # Get agent and run
-            agent = self._agents.get(agent_type)
-            if not agent:
-                raise ValueError(f"Unknown agent type: {agent_type}")
-            
-            # Prepare input (fetch project data if needed)
-            if input_data is None:
-                input_data = await self._get_agent_input(project_id, agent_type)
-            
-            # Execute agent
-            output = await agent.run(input_data)
-            
-            # Update task
-            task.status = TaskStatus.COMPLETED
-            task.output_data = output
-            task.completed_at = datetime.utcnow()
-            task.duration_seconds = (task.completed_at - task.started_at).total_seconds()
-            task.llm_prompt = getattr(agent, 'last_prompt', None)
-            task.llm_response = getattr(agent, 'last_response', None)
-            task.tokens_used = getattr(agent, 'last_tokens_used', None)
-            
-            await self.db.flush()
-            
-            # Store artifacts if generated
-            await self._store_artifacts(project_id, task.id, agent_type, output)
-            
-            # Broadcast task completed
+        # Use a dedicated DB session per agent run to avoid concurrent flush
+        # errors when multiple agents run in parallel.
+        from orchestrator.core.database import async_session_maker
+
+        async with async_session_maker() as session:
+            # Create task record
+            task = AgentTask(
+                project_id=project_id,
+                agent_type=agent_type,
+                status=TaskStatus.RUNNING,
+                input_data=input_data,
+                started_at=datetime.utcnow(),
+            )
+            session.add(task)
+            await session.flush()
+
+            # Broadcast task started
             await self._broadcast_event(
                 project_id,
-                WSEventType.TASK_COMPLETED,
+                WSEventType.TASK_STARTED,
                 {"task_id": str(task.id), "agent_type": agent_type.value},
             )
-            
-            return output
-            
-        except Exception as e:
-            logger.exception("Agent failed", project_id=str(project_id), agent_type=agent_type.value)
-            
-            task.status = TaskStatus.FAILED
-            # If this looks like an LLM permission/error (e.g., 403 PERMISSION_DENIED),
-            # provide a clearer, actionable message for the user/admin.
-            raw = str(e)
-            hint = ""
-            if "403" in raw or "PERMISSION_DENIED" in raw.upper() or "leaked" in raw.lower():
-                hint = (
-                    "\n\nLLM call failed with 403 PERMISSION_DENIED. "
-                    "Rotate your GEMINI_API_KEY or check Google Cloud API key restrictions. "
-                    "You can also call GET /api/v1/llm/health to get more details."
+
+            try:
+                # Get agent and run
+                agent = self._agents.get(agent_type)
+                if not agent:
+                    raise ValueError(f"Unknown agent type: {agent_type}")
+
+                # Prepare input (fetch project data if needed) using this session
+                if input_data is None:
+                    input_data = await self._get_agent_input(project_id, agent_type, session=session)
+
+                # Execute agent. Acquire the global LLM semaphore to avoid overwhelming
+                # the Groq API (reduces 429 Too Many Requests responses).
+                logger.info(
+                    "Awaiting LLM concurrency semaphore",
+                    project_id=str(project_id),
+                    agent_type=agent_type.value,
+                    max_concurrent=_LLM_CONCURRENCY,
                 )
-            task.error_message = raw + hint
-            task.completed_at = datetime.utcnow()
-            await self.db.flush()
-            
-            # Broadcast task failed
-            await self._broadcast_event(
-                project_id,
-                WSEventType.TASK_FAILED,
-                {
-                    "task_id": str(task.id),
-                    "agent_type": agent_type.value,
-                    "error": str(e),
-                },
-            )
-            
-            return None
+                async with _llm_semaphore:
+                    logger.info(
+                        "Acquired LLM semaphore, running agent",
+                        project_id=str(project_id),
+                        agent_type=agent_type.value,
+                    )
+                    output = await agent.run(input_data)
+
+                # Update task
+                task.status = TaskStatus.COMPLETED
+                task.output_data = output
+                task.completed_at = datetime.utcnow()
+                task.duration_seconds = (task.completed_at - task.started_at).total_seconds()
+                task.llm_prompt = getattr(agent, 'last_prompt', None)
+                task.llm_response = getattr(agent, 'last_response', None)
+                task.tokens_used = getattr(agent, 'last_tokens_used', None)
+
+                await session.flush()
+
+                # Store artifacts if generated
+                await self._store_artifacts(project_id, task.id, agent_type, output, session=session)
+
+                # Broadcast task completed
+                await self._broadcast_event(
+                    project_id,
+                    WSEventType.TASK_COMPLETED,
+                    {"task_id": str(task.id), "agent_type": agent_type.value},
+                )
+
+                return output
+
+            except Exception as e:
+                logger.exception("Agent failed", project_id=str(project_id), agent_type=agent_type.value)
+
+                task.status = TaskStatus.FAILED
+                # If this looks like an LLM permission/error (e.g., 403 PERMISSION_DENIED),
+                # provide a clearer, actionable message for the user/admin.
+                raw = str(e)
+                hint = ""
+                if "403" in raw or "PERMISSION_DENIED" in raw.upper() or "leaked" in raw.lower():
+                    hint = (
+                        "\n\nLLM call failed with 403 PERMISSION_DENIED. "
+                        "Rotate your GROQ API key or check key restrictions. "
+                        "You can also call GET /api/v1/llm/health to get more details."
+                    )
+                task.error_message = raw + hint
+                task.completed_at = datetime.utcnow()
+                await session.flush()
+
+                # Broadcast task failed
+                await self._broadcast_event(
+                    project_id,
+                    WSEventType.TASK_FAILED,
+                    {
+                        "task_id": str(task.id),
+                        "agent_type": agent_type.value,
+                        "error": str(e),
+                    },
+                )
+
+                return None
     
     async def _get_agent_input(
         self,
         project_id: uuid.UUID,
         agent_type: AgentType,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """Get input data for an agent based on project state."""
         from sqlalchemy import select
-        
+
+        # Allow callers to pass a session (from _run_agent) or fall back to self.db
+        db_session = session or self.db
+
         if agent_type == AgentType.REQUIREMENT_INTERPRETER:
             # Get raw project description
-            result = await self.db.execute(
+            result = await db_session.execute(
                 select(Project).where(Project.id == project_id)
             )
             project = result.scalar_one()
@@ -359,6 +385,7 @@ class OrchestratorService:
         task_id: uuid.UUID,
         agent_type: AgentType,
         output: dict,
+        session: Optional[AsyncSession] = None,
     ) -> None:
         """Store generated artifacts from agent output."""
         if not output:
@@ -425,12 +452,13 @@ class OrchestratorService:
                     )
                 )
         
-        # Store all artifacts
+        # Store all artifacts using provided session or default session
+        db_session = session or self.db
         for artifact in artifacts_to_store:
-            self.db.add(artifact)
-        
+            db_session.add(artifact)
+
         if artifacts_to_store:
-            await self.db.flush()
+            await db_session.flush()
     
     async def _update_project_status(
         self,
@@ -468,7 +496,7 @@ class OrchestratorService:
         hint = ""
         if "403" in error_message or "PERMISSION_DENIED" in error_message.upper() or "leaked" in error_message.lower():
             hint = (
-                "\n\nLLM permission error detected: rotate your GEMINI_API_KEY or check key restrictions. "
+                "\n\nLLM permission error detected: rotate your GROQ API key or check key restrictions. "
                 "Run GET /api/v1/llm/health for diagnostic details."
             )
 

@@ -36,17 +36,21 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     
-    # LLM Provider Selection — only Groq is supported now
-    llm_provider: Literal["groq"] = "groq"
+    # LLM Provider Selection
+    llm_provider: Literal["groq", "ollama"] = "ollama"
 
-    # Groq Configuration
-    groq_api_key: str = Field(default="")
-    groq_api_url: str = Field(default="https://api.groq.com")
+    # Ollama (local) Configuration
+    ollama_base_url: str = Field(default="http://localhost:11434")
 
-    # LLM Model Settings (Groq-compatible model)
-    llm_model: str = "moonshotai/kimi-k2-instruct-0905"
-    llm_temperature: float = 0.2
-    llm_max_tokens: int = 4096
+    # LLM Model Settings (default to a local Kimi-K2 model)
+    llm_model: str = "kimi-k2:1t-cloud"
+    llm_temperature: float = 0.0
+    llm_max_tokens: int = 2048
+
+    # Runtime tuning: concurrency and retries
+    llm_concurrent_requests: int = 3
+    llm_retry_attempts: int = 5
+    llm_retry_backoff_seconds: float = 5.0
     
     # GitHub Integration
     github_token: Optional[str] = None
