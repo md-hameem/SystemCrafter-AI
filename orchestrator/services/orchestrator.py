@@ -30,8 +30,9 @@ class OrchestratorService:
     Coordinates agents and maintains pipeline state.
     """
     
-    def __init__(self, db: AsyncSession) -> None:
+    def __init__(self, db: AsyncSession, *, owned: bool = False) -> None:
         self.db = db
+        self._owned_session = owned
         self._agents: dict[AgentType, Any] = {}
         self._initialize_agents()
     
@@ -227,6 +228,14 @@ class OrchestratorService:
         except Exception as e:
             logger.exception("Pipeline failed with exception", project_id=str(project_id))
             await self._handle_pipeline_failure(project_id, str(e))
+        finally:
+            # If this orchestrator owns the DB session (created specifically for the
+            # pipeline), close it when the pipeline finishes to release resources.
+            try:
+                if getattr(self, "_owned_session", False):
+                    await self.db.close()
+            except Exception:
+                logger.exception("Failed to close owned DB session")
     
     async def _run_agent(
         self,
@@ -295,7 +304,17 @@ class OrchestratorService:
             logger.exception("Agent failed", project_id=str(project_id), agent_type=agent_type.value)
             
             task.status = TaskStatus.FAILED
-            task.error_message = str(e)
+            # If this looks like an LLM permission/error (e.g., 403 PERMISSION_DENIED),
+            # provide a clearer, actionable message for the user/admin.
+            raw = str(e)
+            hint = ""
+            if "403" in raw or "PERMISSION_DENIED" in raw.upper() or "leaked" in raw.lower():
+                hint = (
+                    "\n\nLLM call failed with 403 PERMISSION_DENIED. "
+                    "Rotate your GEMINI_API_KEY or check Google Cloud API key restrictions. "
+                    "You can also call GET /api/v1/llm/health to get more details."
+                )
+            task.error_message = raw + hint
             task.completed_at = datetime.utcnow()
             await self.db.flush()
             
@@ -445,7 +464,15 @@ class OrchestratorService:
         error_message: str,
     ) -> None:
         """Handle pipeline failure."""
-        logger.error("Pipeline failed", project_id=str(project_id), error=error_message)
+        # Add actionable hint for LLM 403 errors
+        hint = ""
+        if "403" in error_message or "PERMISSION_DENIED" in error_message.upper() or "leaked" in error_message.lower():
+            hint = (
+                "\n\nLLM permission error detected: rotate your GEMINI_API_KEY or check key restrictions. "
+                "Run GET /api/v1/llm/health for diagnostic details."
+            )
+
+        logger.error("Pipeline failed", project_id=str(project_id), error=error_message + hint)
         
         await self._update_project_status(project_id, ProjectStatus.FAILED)
         

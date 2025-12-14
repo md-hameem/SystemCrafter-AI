@@ -53,12 +53,21 @@ export function useProjectWebSocket(
   const connect = useCallback(() => {
     if (!projectId || !token) return
 
-    // Close existing connection
-    if (wsRef.current) {
-      wsRef.current.close()
+    // Avoid creating a new connection if one is already open or connecting
+    if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
+      console.debug('[WebSocket] connection already open or connecting - skipping new connect')
+      return
     }
 
     const wsUrl = `${WS_BASE_URL}/api/v1/ws/${projectId}?token=${token}`
+    console.debug('[WebSocket] connecting to', wsUrl)
+    // Close any previous connection (if in CLOSING/DEAD state)
+    try {
+      wsRef.current?.close()
+    } catch (err) {
+      // ignore
+    }
+
     const ws = new WebSocket(wsUrl)
 
     ws.onopen = () => {
@@ -80,10 +89,10 @@ export function useProjectWebSocket(
     }
 
     ws.onclose = (event) => {
-      console.log('[WebSocket] Disconnected:', event.code, event.reason)
+      console.warn('[WebSocket] Disconnected:', event.code, event.reason)
 
-      // Attempt to reconnect with exponential backoff
-      if (reconnectAttempts.current < maxReconnectAttempts) {
+      // Only attempt reconnect for non-normal closures
+      if (event.code !== 1000 && reconnectAttempts.current < maxReconnectAttempts) {
         const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 30000)
         reconnectTimeoutRef.current = setTimeout(() => {
           reconnectAttempts.current++
@@ -91,6 +100,18 @@ export function useProjectWebSocket(
         }, delay)
       }
     }
+
+    // Heartbeat ping to keep the connection alive and detect stale sockets
+    const heartbeat = setInterval(() => {
+      try {
+        if (ws.readyState === WebSocket.OPEN) ws.send('ping')
+      } catch (err) {
+        // ignore
+      }
+    }, 15000)
+
+    // Clean up heartbeat when socket closes
+    ws.addEventListener('close', () => clearInterval(heartbeat))
 
     wsRef.current = ws
   }, [projectId, token, onMessage])

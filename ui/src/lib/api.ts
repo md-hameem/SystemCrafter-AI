@@ -150,30 +150,10 @@ class ApiClient {
   // =========================================================================
 
   async login(email: string, password: string): Promise<AuthResponse> {
-    const formData = new URLSearchParams()
-    formData.append('username', email)
-    formData.append('password', password)
-
-    const response = await fetch(`${this.baseUrl}/api/v1/auth/login`, {
+    return this.request<AuthResponse>('/api/v1/auth/login', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: formData.toString(),
+      body: JSON.stringify({ email, password }),
     })
-
-    if (!response.ok) {
-      let errorMessage = 'Login failed'
-      try {
-        const errorData = await response.json()
-        errorMessage = errorData.detail || errorMessage
-      } catch {
-        errorMessage = response.statusText || errorMessage
-      }
-      throw new Error(errorMessage)
-    }
-
-    return response.json()
   }
 
   async register(
@@ -200,9 +180,15 @@ class ApiClient {
   // =========================================================================
 
   async getProjects(skip = 0, limit = 100): Promise<Project[]> {
-    return this.request<Project[]>(
+    const data = await this.request<any>(
       `/api/v1/projects?skip=${skip}&limit=${limit}`
     )
+
+    // Backend returns a paginated response with an `items` array.
+    if (data == null) return []
+    if (Array.isArray(data)) return data
+    if (Array.isArray(data.items)) return data.items
+    return []
   }
 
   async getProject(id: string): Promise<Project> {

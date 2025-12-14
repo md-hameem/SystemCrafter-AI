@@ -17,7 +17,7 @@ export default function ProjectsPage() {
     queryFn: () => apiClient.getProjects(0, 100),
   })
 
-  const filteredProjects = projects?.filter((project) =>
+  const filteredProjects = (projects || []).filter((project) =>
     project.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
     project.description.toLowerCase().includes(searchQuery.toLowerCase())
   )

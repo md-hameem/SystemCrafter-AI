@@ -17,10 +17,13 @@ export default function DashboardPage() {
   })
 
   const activeStatuses = ['analyzing', 'designing', 'generating', 'building', 'deploying'] as const
+  const projectsList = Array.isArray(projects) ? projects : []
   const stats = {
-    totalProjects: projects?.length || 0,
-    completed: projects?.filter((p) => p.status === 'completed').length || 0,
-    inProgress: projects?.filter((p) => activeStatuses.includes(p.status as typeof activeStatuses[number])).length || 0,
+    totalProjects: projectsList.length,
+    completed: projectsList.filter((p) => p.status === 'completed').length,
+    inProgress: projectsList.filter((p) =>
+      activeStatuses.includes(p.status as typeof activeStatuses[number])
+    ).length,
   }
 
   return (
@@ -97,9 +100,9 @@ export default function DashboardPage() {
               </Card>
             ))}
           </div>
-        ) : projects && projects.length > 0 ? (
+        ) : projectsList.length > 0 ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {projects.slice(0, 6).map((project) => (
+            {projectsList.slice(0, 6).map((project) => (
               <ProjectCard key={project.id} project={project} />
             ))}
           </div>

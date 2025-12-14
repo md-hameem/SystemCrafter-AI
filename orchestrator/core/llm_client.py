@@ -1,8 +1,12 @@
 """
 SystemCrafter AI - LLM Client Abstraction
-Supports both OpenAI and Google Gemini
+Provides a minimal, well-formed implementation for Groq and lightweight
+shims for Gemini/OpenAI so the application can import the module cleanly.
 """
+
 import json
+import asyncio
+import re
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
@@ -15,7 +19,7 @@ logger = structlog.get_logger()
 
 class LLMClient(ABC):
     """Abstract base class for LLM clients."""
-    
+
     @abstractmethod
     async def generate(
         self,
@@ -25,8 +29,8 @@ class LLMClient(ABC):
         max_tokens: Optional[int] = None,
     ) -> str:
         """Generate text from a prompt."""
-        pass
-    
+        raise NotImplementedError()
+
     @abstractmethod
     async def generate_json(
         self,
@@ -36,152 +40,113 @@ class LLMClient(ABC):
         max_tokens: Optional[int] = None,
     ) -> dict[str, Any]:
         """Generate JSON response from a prompt."""
-        pass
+        raise NotImplementedError()
 
 
-class OpenAIClient(LLMClient):
-    """OpenAI API client."""
-    
+# Removed Gemini/OpenAI clients — this runtime only supports Groq.
+
+
+class GroqClient(LLMClient):
+    """Groq LLM client using the official Groq Python SDK.
+
+    Calls to the sync SDK are executed in a thread via `asyncio.to_thread` so
+    the rest of the application can `await` the results.
+    """
+
     def __init__(self):
-        from openai import AsyncOpenAI
-        
-        settings = get_settings()
-        self.client = AsyncOpenAI(api_key=settings.openai_api_key)
-        self.model = settings.llm_model
-        self.default_temperature = settings.llm_temperature
-        self.default_max_tokens = settings.llm_max_tokens
-    
-    async def generate(
-        self,
-        prompt: str,
-        system_prompt: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-    ) -> str:
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
-        
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=temperature or self.default_temperature,
-            max_tokens=max_tokens or self.default_max_tokens,
-        )
-        
-        return response.choices[0].message.content or ""
-    
-    async def generate_json(
-        self,
-        prompt: str,
-        system_prompt: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-    ) -> dict[str, Any]:
-        json_system = (system_prompt or "") + "\n\nRespond with valid JSON only."
-        
-        messages = [
-            {"role": "system", "content": json_system},
-            {"role": "user", "content": prompt},
-        ]
-        
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=temperature or self.default_temperature,
-            max_tokens=max_tokens or self.default_max_tokens,
-            response_format={"type": "json_object"},
-        )
-        
-        content = response.choices[0].message.content or "{}"
-        return json.loads(content)
+        try:
+            from groq import Groq  # type: ignore
+        except Exception as exc:  # pragma: no cover - best-effort import
+            raise RuntimeError("Missing 'groq' package. Install it to use GROQ provider.") from exc
 
-
-class GeminiClient(LLMClient):
-    """Google Gemini API client using google-genai package."""
-    
-    def __init__(self):
-        from google import genai
-        
         settings = get_settings()
-        self.client = genai.Client(api_key=settings.gemini_api_key)
-        self.model_name = settings.llm_model
-        self.default_temperature = settings.llm_temperature
-        self.default_max_tokens = settings.llm_max_tokens
-    
-    async def generate(
-        self,
-        prompt: str,
-        system_prompt: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-    ) -> str:
-        from google.genai import types
-        
-        # Build the full prompt with system instruction
-        full_prompt = prompt
-        if system_prompt:
-            full_prompt = f"{system_prompt}\n\n{prompt}"
-        
-        config = types.GenerateContentConfig(
-            temperature=temperature or self.default_temperature,
-            max_output_tokens=max_tokens or self.default_max_tokens,
-        )
-        
-        response = await self.client.aio.models.generate_content(
-            model=self.model_name,
-            contents=full_prompt,
-            config=config,
-        )
-        
-        return response.text or ""
-    
-    async def generate_json(
-        self,
-        prompt: str,
-        system_prompt: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-    ) -> dict[str, Any]:
-        from google.genai import types
-        
+        api_key = settings.groq_api_key
+        if not api_key:
+            raise RuntimeError("GROQ API key (groq_api_key) is not set in configuration")
+
+        self.client = Groq(api_key=api_key)
+        self.model_name = settings.llm_model or "moonshotai/kimi-k2-instruct-0905"
+        self.default_temperature = getattr(settings, "llm_temperature", 0.0)
+        self.default_max_tokens = getattr(settings, "llm_max_tokens", 512)
+
+    async def _create_completion(self, prompt: str, temperature: float, max_tokens: int, stream: bool = False):
+        def _call():
+            return self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+                max_completion_tokens=max_tokens,
+                stream=stream,
+            )
+
+        return await asyncio.to_thread(_call)
+
+    async def generate(self, prompt: str, system_prompt: Optional[str] = None, temperature: Optional[float] = None, max_tokens: Optional[int] = None) -> str:
+        full_prompt = prompt if not system_prompt else f"{system_prompt}\n\n{prompt}"
+        temperature = temperature or self.default_temperature
+        max_tokens = max_tokens or self.default_max_tokens
+
+        try:
+            resp = await self._create_completion(full_prompt, temperature, max_tokens, stream=False)
+        except Exception as exc:
+            raise RuntimeError(f"Groq LLM request failed: {exc}") from exc
+
+        try:
+            if hasattr(resp, "choices"):
+                first = resp.choices[0]
+                if getattr(first, "message", None) and getattr(first.message, "content", None):
+                    return first.message.content
+                if getattr(first, "delta", None) and getattr(first.delta, "content", None):
+                    return first.delta.content
+            return str(resp)
+        except Exception:
+            return str(resp)
+
+    async def generate_json(self, prompt: str, system_prompt: Optional[str] = None, temperature: Optional[float] = None, max_tokens: Optional[int] = None) -> dict[str, Any]:
         json_system = (system_prompt or "") + "\n\nRespond with valid JSON only. No markdown code blocks."
         full_prompt = f"{json_system}\n\n{prompt}"
-        
-        config = types.GenerateContentConfig(
-            temperature=temperature or self.default_temperature,
-            max_output_tokens=max_tokens or self.default_max_tokens,
-            response_mime_type="application/json",
-        )
-        
-        response = await self.client.aio.models.generate_content(
-            model=self.model_name,
-            contents=full_prompt,
-            config=config,
-        )
-        
-        content = response.text or "{}"
-        # Clean up potential markdown formatting
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-        content = content.strip()
-        
-        return json.loads(content)
+        temperature = temperature or self.default_temperature
+        max_tokens = max_tokens or self.default_max_tokens
+
+        resp = await self._create_completion(full_prompt, temperature, max_tokens, stream=False)
+
+        content = None
+        try:
+            if hasattr(resp, "choices"):
+                first = resp.choices[0]
+                if getattr(first, "message", None) and getattr(first.message, "content", None):
+                    content = first.message.content
+                elif getattr(first, "delta", None) and getattr(first.delta, "content", None):
+                    content = first.delta.content
+        except Exception:
+            pass
+
+        if not content:
+            content = str(resp)
+
+        try:
+            return json.loads(content)
+        except Exception:
+            m = re.search(r"\{.*\}", content, re.S)
+            if m:
+                try:
+                    return json.loads(m.group(0))
+                except Exception:
+                    pass
+
+        raise RuntimeError("Groq client failed to return valid JSON")
 
 
 def get_llm_client() -> LLMClient:
-    """Factory function to get the appropriate LLM client based on settings."""
+    """Factory that returns the Groq client — OpenAI/Gemini removed."""
     settings = get_settings()
-    
-    if settings.llm_provider == "gemini":
-        logger.info("Using Google Gemini LLM client", model=settings.llm_model)
-        return GeminiClient()
-    else:
-        logger.info("Using OpenAI LLM client", model=settings.llm_model)
-        return OpenAIClient()
+    provider = (settings.llm_provider or "").lower()
+
+    if provider and provider != "groq":
+        logger.warning("LLM provider configured as '%s' but only 'groq' is supported — overriding to 'groq'", provider)
+
+    logger.info("Using Groq LLM client", model=settings.llm_model)
+    return GroqClient()
 
 
 # Singleton instance
@@ -194,3 +159,4 @@ def get_llm() -> LLMClient:
     if _llm_client is None:
         _llm_client = get_llm_client()
     return _llm_client
+

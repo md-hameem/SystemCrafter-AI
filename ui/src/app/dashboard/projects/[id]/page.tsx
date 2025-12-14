@@ -88,7 +88,7 @@ export default function ProjectDetailPage() {
               : t
           )
         )
-        refetchArtifacts()
+        queryClient.invalidateQueries({ queryKey: ['artifacts', projectId] })
         break
       case 'task_failed':
         setTasks((prev) =>
@@ -106,7 +106,7 @@ export default function ProjectDetailPage() {
         }
         break
     }
-  }, [refetchArtifacts])
+  }, [projectId, queryClient])
 
   // WebSocket connection
   const token = Cookies.get('access_token')

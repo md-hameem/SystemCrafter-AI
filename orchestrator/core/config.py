@@ -15,6 +15,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="allow",
     )
     
     # Application
@@ -35,17 +36,15 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     
-    # LLM Provider Selection
-    llm_provider: Literal["openai", "gemini"] = "gemini"
-    
-    # OpenAI Configuration
-    openai_api_key: str = Field(default="")
-    
-    # Google Gemini Configuration
-    gemini_api_key: str = Field(default="")
-    
-    # LLM Model Settings
-    llm_model: str = "gemini-2.5-flash"
+    # LLM Provider Selection — only Groq is supported now
+    llm_provider: Literal["groq"] = "groq"
+
+    # Groq Configuration
+    groq_api_key: str = Field(default="")
+    groq_api_url: str = Field(default="https://api.groq.com")
+
+    # LLM Model Settings (Groq-compatible model)
+    llm_model: str = "moonshotai/kimi-k2-instruct-0905"
     llm_temperature: float = 0.2
     llm_max_tokens: int = 4096
     

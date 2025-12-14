@@ -22,6 +22,8 @@ from orchestrator.schemas import (
     ProjectUpdate,
 )
 from orchestrator.services.orchestrator import OrchestratorService
+from orchestrator.core.database import async_session_maker
+import asyncio
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
 logger = get_logger(__name__)
@@ -52,10 +54,22 @@ async def create_project(
     db.add(project)
     await db.flush()
     await db.refresh(project)
+    # Persist the project so background pipelines using a separate session
+    # can read it immediately (avoid NoResultFound when querying).
+    await db.commit()
+    await db.refresh(project)
     
-    # Start orchestration pipeline (async task)
-    orchestrator = OrchestratorService(db)
-    await orchestrator.start_pipeline(project)
+    # Start orchestration pipeline in a background task that creates its own
+    # DB session. This ensures the pipeline uses a session not tied to the
+    # request lifecycle and avoids transaction/state conflicts.
+    async def _pipeline_runner(pid: uuid.UUID) -> None:
+        async with async_session_maker() as session:
+            orchestrator = OrchestratorService(session, owned=True)
+            # Run the pipeline in this context (not as a nested task) so the
+            # session remains alive for the whole pipeline.
+            await orchestrator._run_pipeline(pid)
+
+    asyncio.create_task(_pipeline_runner(project.id))
     
     logger.info("Project created", project_id=str(project.id))
     return project
@@ -280,8 +294,55 @@ async def retry_project(
     project.status = ProjectStatus.PENDING
     await db.flush()
     
-    orchestrator = OrchestratorService(db)
-    await orchestrator.start_pipeline(project)
+    async def _pipeline_runner(pid: uuid.UUID) -> None:
+        async with async_session_maker() as session:
+            orchestrator = OrchestratorService(session, owned=True)
+            await orchestrator._run_pipeline(pid)
+
+    asyncio.create_task(_pipeline_runner(project.id))
     
     await db.refresh(project)
     return project
+
+
+@router.post("/{project_id}/start", status_code=status.HTTP_202_ACCEPTED)
+async def start_project(
+    project_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    """Manually start the generation pipeline for an existing project."""
+    logger.info("Start project request received", user_id=str(current_user.id), project_id=str(project_id))
+    result = await db.execute(
+        select(Project).where(
+            Project.id == project_id,
+            Project.owner_id == current_user.id,
+        )
+    )
+    project = result.scalar_one_or_none()
+
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    # Only allow starting if project is pending or failed
+    if project.status not in (ProjectStatus.PENDING, ProjectStatus.FAILED):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Project cannot be started in its current state")
+
+    # Ensure status persisted before background session reads it
+    project.status = ProjectStatus.PENDING
+    await db.flush()
+    await db.commit()
+    logger.info("Project status persisted before pipeline start", project_id=str(project.id), status=project.status)
+
+    async def _pipeline_runner(pid: uuid.UUID) -> None:
+        async with async_session_maker() as session:
+            orchestrator = OrchestratorService(session, owned=True)
+            try:
+                logger.info("Launching background pipeline task", project_id=str(pid))
+                await orchestrator._run_pipeline(pid)
+            except Exception as exc:
+                logger.error("Background pipeline encountered an error", project_id=str(pid), error=str(exc))
+
+    asyncio.create_task(_pipeline_runner(project.id))
+
+    return {"status": "started", "project_id": str(project.id)}

@@ -8,7 +8,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
 
-from orchestrator.api import auth_router, projects_router, tasks_router, ws_router
+from orchestrator.api import (
+    auth_router,
+    projects_router,
+    tasks_router,
+    ws_router,
+    llm_router,
+)
 from orchestrator.core import get_settings, init_db, setup_logging
 from orchestrator.schemas import HealthCheck
 
@@ -54,6 +60,7 @@ app.include_router(auth_router, prefix="/api/v1")
 app.include_router(projects_router, prefix="/api/v1")
 app.include_router(tasks_router, prefix="/api/v1")
 app.include_router(ws_router, prefix="/api/v1")
+app.include_router(llm_router, prefix="/api/v1")
 
 
 @app.get("/", tags=["Root"])
