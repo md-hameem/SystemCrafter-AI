@@ -216,6 +216,134 @@ class GroqClient(LLMClient):
         raise RuntimeError(f"Groq client failed to return valid JSON. Raw content: {content[:1000]!r}")
 
 
+class MistralClient(LLMClient):
+    """Mistral AI LLM client using HTTP API.
+    
+    Uses the Mistral AI REST API for chat completions.
+    Documentation: https://docs.mistral.ai/api/
+    """
+
+    def __init__(self):
+        try:
+            import httpx
+        except ImportError as exc:
+            raise RuntimeError("Missing 'httpx' package. Install it to use Mistral provider.") from exc
+
+        settings = get_settings()
+        api_key = settings.mistral_api_key
+        if not api_key:
+            raise RuntimeError("Mistral API key (mistral_api_key) is not set in configuration")
+
+        self._api_key = api_key
+        self._base_url = "https://api.mistral.ai/v1"
+        self.model_name = settings.llm_model or "mistral-large-latest"
+        self.default_temperature = getattr(settings, "llm_temperature", 0.0)
+        self.default_max_tokens = getattr(settings, "llm_max_tokens", 2048)
+        self._retry_attempts = getattr(settings, "llm_retry_attempts", 5)
+        self._retry_backoff = getattr(settings, "llm_retry_backoff_seconds", 5)
+        self._httpx = httpx
+
+    async def _create_completion(self, prompt: str, temperature: float, max_tokens: int) -> dict:
+        """Make an async request to Mistral API."""
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+
+        last_exc = None
+        for attempt in range(1, max(1, self._retry_attempts) + 1):
+            try:
+                async with self._httpx.AsyncClient(timeout=120) as client:
+                    response = await client.post(
+                        f"{self._base_url}/chat/completions",
+                        headers=headers,
+                        json=payload,
+                    )
+                    response.raise_for_status()
+                    return response.json()
+            except Exception as exc:
+                last_exc = exc
+                wait = self._retry_backoff * (2 ** (attempt - 1)) + random.uniform(0, 1)
+                logger.warning(
+                    "Mistral request failed, will retry",
+                    attempt=attempt,
+                    max_attempts=self._retry_attempts,
+                    wait_seconds=wait,
+                    error=str(exc),
+                )
+                if attempt == self._retry_attempts:
+                    break
+                await asyncio.sleep(wait)
+
+        raise RuntimeError(f"Mistral LLM request failed after {self._retry_attempts} attempts: {last_exc}") from last_exc
+
+    async def generate(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> str:
+        full_prompt = prompt if not system_prompt else f"{system_prompt}\n\n{prompt}"
+        temperature = temperature or self.default_temperature
+        max_tokens = max_tokens or self.default_max_tokens
+
+        result = await self._create_completion(full_prompt, temperature, max_tokens)
+
+        try:
+            return result["choices"][0]["message"]["content"]
+        except (KeyError, IndexError):
+            return str(result)
+
+    async def generate_json(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> dict[str, Any]:
+        json_system = (system_prompt or "") + "\n\nRespond with valid JSON only. No markdown code blocks."
+        full_prompt = f"{json_system}\n\n{prompt}"
+        temperature = temperature or self.default_temperature
+        max_tokens = max_tokens or self.default_max_tokens
+
+        result = await self._create_completion(full_prompt, temperature, max_tokens)
+
+        try:
+            content = result["choices"][0]["message"]["content"]
+        except (KeyError, IndexError):
+            content = str(result)
+
+        # Clean up markdown code blocks
+        try:
+            content = re.sub(r"```json\s*(.*?)\s*```", r"\1", content, flags=re.S | re.I)
+            content = re.sub(r"```\s*(.*?)\s*```", r"\1", content, flags=re.S)
+            content = content.strip()
+        except Exception:
+            pass
+
+        try:
+            return json.loads(content)
+        except Exception:
+            # Try to extract JSON object
+            m = re.search(r"(\{(?:.|\s)*\}|\[(?:.|\s)*\])", content, re.S)
+            if m:
+                candidate = m.group(0)
+                candidate = re.sub(r",\s*(\}|\])", r"\1", candidate)
+                try:
+                    return json.loads(candidate)
+                except Exception:
+                    pass
+
+        raise RuntimeError(f"Mistral client failed to return valid JSON. Raw content: {content[:1000]!r}")
+
+
 def get_llm_client() -> LLMClient:
     """Factory that returns an Ollama client instance. Ollama is the only supported provider."""
     settings = get_settings()
@@ -342,14 +470,34 @@ def get_llm_client() -> LLMClient:
 
             raise RuntimeError(f"Ollama client failed to return valid JSON. Raw: {text[:1000]!r}")
 
-    # Always prefer Ollama for LLM operations
-    try:
-        client = OllamaClient()
-        logger.info("Using Ollama LLM client", model=settings.llm_model)
-        return client
-    except Exception:
-        logger.exception("Failed to initialize Ollama client")
-        raise
+    # Check llm_provider setting and return appropriate client
+    provider = getattr(settings, "llm_provider", "ollama").lower()
+    
+    if provider == "groq":
+        try:
+            client = GroqClient()
+            logger.info("Using Groq LLM client", model=settings.llm_model)
+            return client
+        except Exception as exc:
+            logger.exception("Failed to initialize Groq client", error=str(exc))
+            raise
+    elif provider == "mistral":
+        try:
+            client = MistralClient()
+            logger.info("Using Mistral LLM client", model=settings.llm_model)
+            return client
+        except Exception as exc:
+            logger.exception("Failed to initialize Mistral client", error=str(exc))
+            raise
+    else:
+        # Default to Ollama
+        try:
+            client = OllamaClient()
+            logger.info("Using Ollama LLM client", model=settings.llm_model)
+            return client
+        except Exception:
+            logger.exception("Failed to initialize Ollama client")
+            raise
 
 
 # Singleton instance

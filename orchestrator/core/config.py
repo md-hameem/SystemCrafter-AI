@@ -37,10 +37,16 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     
     # LLM Provider Selection
-    llm_provider: Literal["groq", "ollama"] = "ollama"
+    llm_provider: Literal["groq", "ollama", "mistral"] = "ollama"
 
     # Ollama (local) Configuration
     ollama_base_url: str = Field(default="http://localhost:11434")
+
+    # Groq API Key (for cloud LLM)
+    groq_api_key: Optional[str] = Field(default=None)
+
+    # Mistral API Key
+    mistral_api_key: Optional[str] = Field(default=None)
 
     # LLM Model Settings (default to a local Kimi-K2 model)
     llm_model: str = "kimi-k2:1t-cloud"

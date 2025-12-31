@@ -287,10 +287,22 @@ class WSEventType(str, Enum):
 
 class WSEvent(BaseModel):
     """WebSocket event message."""
-    event_type: WSEventType
+    model_config = ConfigDict(populate_by_name=True)
+    
+    event_type: WSEventType = Field(..., serialization_alias="type")
     project_id: uuid.UUID
     data: dict[str, Any]
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+    
+    def model_dump_json(self, **kwargs):
+        """Override to ensure project_id is serialized as string."""
+        # Force by_alias to be True so event_type becomes 'type'
+        kwargs.setdefault('by_alias', True)
+        data = self.model_dump(**kwargs)
+        # Convert UUID to string
+        data['project_id'] = str(data['project_id'])
+        import json
+        return json.dumps(data, default=str)
 
 
 # =============================================================================

@@ -76,6 +76,10 @@ export function useProjectWebSocket(
     }
 
     ws.onmessage = (event) => {
+      // Skip heartbeat pong responses
+      if (event.data === 'pong') {
+        return
+      }
       try {
         const data = JSON.parse(event.data) as WebSocketMessage
         onMessage(data)
@@ -155,6 +159,10 @@ export function createWebSocketConnection(
 
   if (handlers.onMessage) {
     ws.onmessage = (event) => {
+      // Skip heartbeat pong responses
+      if (event.data === 'pong') {
+        return
+      }
       try {
         const data = JSON.parse(event.data) as WebSocketMessage
         handlers.onMessage!(data)

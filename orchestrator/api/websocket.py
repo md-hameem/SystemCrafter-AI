@@ -9,13 +9,12 @@ from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from orchestrator.core import get_db, get_logger, decode_access_token
-from orchestrator.services.websocket_manager import WebSocketManager
+from orchestrator.services.websocket_manager import ws_manager
 
 router = APIRouter(prefix="/ws", tags=["WebSocket"])
 logger = get_logger(__name__)
 
-# Global WebSocket manager
-ws_manager = WebSocketManager()
+# Connection logic uses the global ws_manager instance imported above
 
 
 @router.websocket("/projects/{project_id}")

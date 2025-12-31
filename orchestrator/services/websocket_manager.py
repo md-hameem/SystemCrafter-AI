@@ -41,7 +41,16 @@ class WebSocketManager:
         event: WSEvent,
     ) -> None:
         """Broadcast an event to all connections for a project."""
+        connection_count = len(self.active_connections.get(project_id, set()))
+        logger.info(
+            "Broadcasting WebSocket event",
+            project_id=project_id,
+            event_type=event.event_type,
+            active_connections=connection_count,
+        )
+        
         if project_id not in self.active_connections:
+            logger.warning("No active WebSocket connections for project", project_id=project_id)
             return
         
         message = event.model_dump_json()
